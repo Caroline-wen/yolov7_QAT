@@ -13,7 +13,7 @@ import collections
 from yolov7.utils.datasets import create_dataloader
 def prepare_dataset(cocodir, batch_size=4):
     dataloder = create_dataloader(
-        f"{cocodir}",
+        path=f"{cocodir}",
         imgsz=640,
         batch_size=batch_size,
         opt=collections.namedtuple("opt", "single_cls")(False),
@@ -25,13 +25,13 @@ def prepare_dataset(cocodir, batch_size=4):
 import yolov7.test as test
 from pathlib import Path
 import os
-def evaluate_coco(model, loader, save_dir='.', conf_thres=0.001, iou_thres=0.005):
+def evaluate_coco(path, model, loader, save_dir='.', conf_thres=0.001, iou_thres=0.005):
 
     if save_dir and os.path.dirname(save_dir) != "":
         os.makedirs(os.path.dirname(save_dir), exist_ok=True)
 
     return test.test(
-        "yolov7/data/coco128.yaml",
+        data=path,
         save_dir=Path(save_dir),
         conf_thres=conf_thres,
         iou_thres=iou_thres,
@@ -49,8 +49,11 @@ if __name__ == '__main__':
 
     model = load_yolov7_model(weight, device)
 
-    cocodir = "datasets/coco128"
-    dataloder = prepare_dataset(cocodir)
+    coco128_dir = "datasets/coco128"
+    coco2017_dir = "datasets/coco2017"
+    coco128_yaml = "yolov7/data/coco128.yaml"
+    coco2017_yaml = "yolov7/data/coco2017.yaml"
+    dataloder = prepare_dataset(coco128_dir)
     
 
-    ap = evaluate_coco(model, dataloder)
+    ap = evaluate_coco(coco128_yaml, model, dataloder)

@@ -60,17 +60,38 @@ def tranfer_torch_to_quantization(nn_instance, quant_module):
     __init__(quant_instance)
     return quant_instance
 
-def torch_model_find_quant_module(module, module_dict, prefix=''):
+import re
+def quantization_ignore_match(ignore_layer, path):
+    if ignore_layer is None:
+        return False
+    if isinstance(ignore_layer, str) or isinstance(ignore_layer, list):
+        if isinstance(ignore_layer, str):
+            ignore_layer = [ignore_layer]
+        if path in ignore_layer:
+            return True
+        for item in ignore_layer:
+            if re.match(item, path):
+                return True
+    return False
+
+
+
+def torch_model_find_quant_module(module, module_dict, ignore_layer, prefix=''):
     for name in module._modules:
         submodule = module._modules[name]
         path = name if prefix == '' else prefix + '.' + name
-        torch_model_find_quant_module(submodule, module_dict, prefix=path)
+        torch_model_find_quant_module(submodule, module_dict, ignore_layer, prefix=path)
 
         submodule_id = id(type(submodule))
         if submodule_id in module_dict:
+            ignored = quantization_ignore_match(ignore_layer, path)
+            if ignored:
+                print(f"Quantization: {path} has ignored.")
+                continue
+            # 转换
             module._modules[name] = tranfer_torch_to_quantization(submodule, module_dict[submodule_id])
 
-def replace_to_quantization_model(model):
+def replace_to_quantization_model(model, ignore_layer=None):
     '''
     function: 手动插入量化节点
     '''
@@ -79,12 +100,12 @@ def replace_to_quantization_model(model):
         module = getattr(entry.orig_mod, entry.mod_name)
         module_dict[id(module)] = entry.replace_mod
 
-    torch_model_find_quant_module(model, module_dict)
+    torch_model_find_quant_module(model, module_dict, ignore_layer)
     
 
 import collections   
 from yolov7.utils.datasets import create_dataloader
-def prepare_dataset(cocodir, batch_size=4):
+def prepare_val_dataset(cocodir, batch_size=4):
     dataloder = create_dataloader(
         f"{cocodir}",
         imgsz=640,
@@ -94,6 +115,25 @@ def prepare_dataset(cocodir, batch_size=4):
         stride=32, pad=0.5, image_weights=False
     )[0]
     return dataloder
+
+import yaml
+def prepare_train_dataset(cocodir, batch_size=4):
+
+    with open("yolov7/data/hyp.scratch.p5.yaml") as f:
+        hyp = yaml.load(f, Loader=yaml.SafeLoader)
+
+
+    dataloder = create_dataloader(
+        f"{cocodir}",
+        imgsz=640,
+        batch_size=batch_size,
+        opt=collections.namedtuple("opt", "single_cls")(False),
+        augment=False, hyp=hyp, rect=False, cache=False,
+        stride=32, pad=0.5, image_weights=False
+    )[0]
+    return dataloder
+
+
 
 import yolov7.test as test
 from pathlib import Path
@@ -166,6 +206,107 @@ def calibration_model(model, dataloader, device):
     compute_amax(model, method='mse')  # 第二个参数是histogram计算amax值的方式: [entropy, mse, percentile] 相对熵法 均方误差 百分比
 
 
+def export_ptq(model, save_file, device, dynamic_batch=False):
+    input_dummy = torch.randn(1, 3, 640, 640, device=device)
+    quant_nn.TensorQuantizer.use_fb_fake_quant = True
+    model.eval()
+    with torch.no_grad():
+        torch.onnx.export(
+            model, input_dummy, save_file, opset_version=13,
+            input_names=['input'], output_names=['ouptput'],
+            dynamic_axes={'input': {0: 'batch'}, 'output': {0: 'batch'}} if dynamic_batch else None,
+        )
+    quant_nn.TensorQuantizer.use_fb_fake_quant = False
+
+def have_quantizer(layer):
+    for name, module in layer.named_modules():
+        if isinstance(module, quant_nn.TensorQuantizer):
+            return True
+
+class disable_quantization():
+    def __init__(self, model):
+        self.model = model
+    
+    def apply(self, disabled=True):
+        for name, module in self.model.named_modules():
+            if isinstance(module, quant_nn.TensorQuantizer):
+                module._disabled = disabled
+    
+    def __enter__(self):
+        self.apply(disabled=True)
+    
+    def __exit__(self, *args, **kwargs):
+        self.apply(disabled=False)
+
+
+class enable_quantization():
+    def __init__(self, model):
+        self.model = model
+    
+    def apply(self, enabled=True):
+        for name, module in self.model.named_modules():
+            if isinstance(module, quant_nn.TensorQuantizer):
+                module._disabled = not enabled
+    
+    def __enter__(self):
+        self.apply(enabled=True)
+        return self
+    
+    def __exit__(self, *args, **kwargs):
+        self.apply(enabled=False)
+
+import json
+class SummaryTool:
+    def __init__(self, file):
+        self.file = file
+        self.data = []
+
+    def append(self, item):
+        self.data.append(item)
+        json.dump(self.data, open(self.file, "w"), indent=4)
+
+
+
+def sensitive_analysis(model, loader):
+    '''
+        1.for循环model的每一个quantizer层(model:自动插入QDQ后的模型)
+        2.关闭量化层,其余层的量化保留
+        3.验证模型的精度,并保存精度值(用evaluate_coco()计算AP和mAP)
+        4.验证结束,重启该层的量化操作(还原层)
+        5.for循环结束,得到所有层的精度值
+        6.排序,得到前10个对精度影响比较大的层,将这些层进行打印
+    '''
+    save_file = "sensitive_analysis.json"
+    summary = SummaryTool(save_file)
+
+
+    # for循环每一个层
+    print("sensitive analysis by each layer...")
+    for i in range(0, len(model.model)):
+        layer = model.model[i]
+        # 判断layer是否为量化层
+        if have_quantizer(layer):  # 如果为量化层
+            # 使该层量化失效, 不做Int8, 使用FP16运算
+            disable_quantization(layer).apply()
+            # 计算map值
+            ap = evaluate_coco(model, loader)
+
+            # 保存精度值(JSON文件)
+            summary.append([ap, f"model.{i}"])
+
+            # 重启该层的量化
+            enable_quantization(layer).apply()
+            print(f"layer {i} ap: {ap}")
+        else:
+            print(f"ignore model.{i} because it is {type(layer)}")
+
+    # 循环结束, 打印前10个影响比较大的层
+    summary = sorted(summary.data, key=lambda x: x[0], reverse=True)
+    print("Sensitive Summary: ")
+    for n, (ap, name) in enumerate(summary[:10]):
+        print(f"Top{n}: Using FP16 {name}, ap = {ap:.5f}")
+
+
 if __name__ == '__main__':
     weight = "yolov7.pt"
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -173,23 +314,42 @@ if __name__ == '__main__':
     # 加载数据
     print("Evaluate Dataset...")
     cocodir = "datasets/coco128"
-    dataloder = prepare_dataset(cocodir)
+    val_dataloder = prepare_val_dataset(cocodir)
+    train_dataloder = prepare_train_dataset(cocodir)
 
     # # 加载pth(pytorch)模型
     # print("Load Origin pytorch model...")
     # pth_model = load_yolov7_model(weight, device)
-
     # # pth模型验证
     # print("Evaluate Origin pytorch model...")
     # pth_ap = evaluate_coco(pth_model, dataloder)
 
     # 获取伪量化模型(手动插入QDQ, 手动Initial)
     qnt_auto_model = prepare_model(weight, device)
-    replace_to_quantization_model(qnt_auto_model)
+    # replace_to_quantization_model(qnt_auto_model)
     
     # 模型标定
-    calibration_model(qnt_auto_model, dataloder, device)
+    # calibration_model(qnt_auto_model, train_dataloder, device)
 
-    # PTQ模型验证
-    print("Evaluate Hist PTQ model...")
-    ptq_ap = evaluate_coco(qnt_auto_model, dataloder)
+    # 敏感层分析
+    # sensitive_analysis(qnt_auto_model, val_dataloder)
+
+    # 如何处理敏感层分析出的结果:将影响较大的层关闭量化,使用fp16进行计算
+    # 所以在进行PTQ量化之前就要进行敏感层的分析,得到影响较大的层,然后在手动插入量化节点
+    # 的时候将这些影响层进行量化的关闭
+
+    ignore_layer = [
+        "model\.7\.(.*)", "model\.91\.(.*)","mnodel\.92\.(.*)","model\.85\.(.*)","model\.64\.(.*)",
+        "model\.63\.(.*)","model\.72\.(.*)","model\.58\.(.*)","odel\.99\.(.*)","model\.26\.(.*)"
+    ]
+    replace_to_quantization_model(qnt_auto_model, ignore_layer)
+    print(qnt_auto_model)
+
+
+    # # 导出PTQ模型的ONNX文件
+    # print("Export PTQ model...")
+    # export_ptq(qnt_auto_model, "ptq_yolov7.onnx", device)
+
+    # # PTQ模型验证
+    # print("Evaluate PTQ model...")
+    # ptq_ap = evaluate_coco(qnt_auto_model, dataloder)

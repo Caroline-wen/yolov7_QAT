@@ -116,12 +116,12 @@ def evaluate_coco(model, loader, save_dir='.', conf_thres=0.001, iou_thres=0.005
         save_json=False
     )[0][3]
 
-def collect_stats(model, dataloader, device, num_batch=200):
+def collect_stats(model, data_loader, device, num_batch=200):
     model.eval()
 
     # 开启校准器
     for name, module in model.named_modules():
-        if isinstance(model, quant_nn.TensorQuantizer):
+        if isinstance(module, quant_nn.TensorQuantizer):
             if module._calibrator is not None:
                 module.disable_quant()
                 module.enable_calib()
@@ -130,8 +130,8 @@ def collect_stats(model, dataloader, device, num_batch=200):
     
     # test
     with torch.no_grad():
-        for i in enumerate(data_loader):
-            imgs = datas[0].to(device, non_bloking=True).float()/255.0
+        for i, datas in enumerate(data_loader):
+            imgs = datas[0].to(device, non_blocking=True).float()/255.0
             model(imgs)
 
             if i >= num_batch:
@@ -139,10 +139,10 @@ def collect_stats(model, dataloader, device, num_batch=200):
     
     # 关闭校准器
     for name, module in model.named_modules():
-        if isinstance(model, quant_nn.TensorQuantizer):
+        if isinstance(module, quant_nn.TensorQuantizer):
             if module._calibrator is not None:
                 module.enable_quant()
-                module.diable_calib()
+                module.disable_calib()
             else:
                 module.enable()
 
@@ -163,7 +163,7 @@ def calibration_model(model, dataloader, device):
     collect_stats(model, dataloader, device)
 
     # 获取动态范围, 计算amax和scale值
-    compute_amax(model, method='mes')
+    compute_amax(model, method='mse')  # 第二个参数是histogram计算amax值的方式: [entropy, mse, percentile] 相对熵法 均方误差 百分比
 
 
 def export_ptq(model, save_file, device, dynamic_batch=False):
@@ -192,7 +192,7 @@ if __name__ == '__main__':
 
     # # 加载pth(pytorch)模型
     # print("Load Origin pytorch model...")
-    # pth_model = load_yolov7_model(weight, device)
+    pth_model = load_yolov7_model(weight, device)
     # # pth模型验证
     # print("Evaluate Origin pytorch model...")
     # pth_ap = evaluate_coco(pth_model, dataloder)
@@ -205,8 +205,8 @@ if __name__ == '__main__':
     calibration_model(qnt_auto_model, dataloder, device)
 
     # # 导出PTQ模型的ONNX文件
-    print("Export PTQ model...")
-    export_ptq(qnt_auto_model, "ptq_yolov7.onnx", device)
+    print("Export PTH model...")
+    export_ptq(pth_model, "yolov7.onnx", device)
 
     # # PTQ模型验证
     # print("Evaluate PTQ model...")
