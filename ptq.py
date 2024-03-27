@@ -89,7 +89,7 @@ if __name__ == '__main__':
         print("Sensitive Analysis ...")
         run_SensitiveAnalysis(args.weights, args.cocodir)
         
-    # PTQ
+    # PTQ量化
     # ignore_layers = ["model\.105\.m\.(.*)"]
     # args.ignore_layers = ignore_layers
     
