@@ -1,7 +1,5 @@
 import torch
-
 import quantize
-
 import argparse
 
 # import debugpy
@@ -49,7 +47,7 @@ def run_PTQ(args, device='cpu'):
         print("Evaluate Origin ...")
         with quantize.disable_quantization(model):
             ap = quantize.evaluate_coco(model, val_dataloader, conf_threshold=args.conf_thres, iou_threshold=args.iou_thres)
-            summary.append(['PTQ', ap])
+            summary.append(['Origin', ap])
     
     # export model
     if args.save_ptq:

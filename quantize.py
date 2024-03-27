@@ -146,7 +146,7 @@ def evaluate_coco(model, loader, save_dir='.', conf_threshold=0.001, iou_thresho
         os.makedirs(os.path.dirname(save_dir), exist_ok=True)
     
     return test.test(
-        "./yolov7/data/coco.yaml",
+        "./yolov7/data/coco128.yaml",
         save_dir=Path("."),
         conf_thres=conf_threshold,
         iou_thres=iou_threshold,
